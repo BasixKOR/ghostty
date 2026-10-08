@@ -198,6 +198,8 @@ extension Ghostty {
 
         // This is set to non-null during keyDown to accumulate insertText contents
         private var keyTextAccumulator: [String]?
+        // Set when interpretKeyEvents dispatches a non-text command back to us.
+        private var interpretedKeyEventAsCommand = false
         /// Temporary lead surrogate that's waiting for the trail
         private var leadSurrogate: LeadSurrogate?
 
@@ -1165,18 +1167,24 @@ extension Ghostty {
             // We need to know the keyboard layout before below because some keyboard
             // input events will change our keyboard layout and we don't want those
             // going to the terminal.
-            let keyboardIdBefore: String? = if !markedTextBefore {
-                KeyboardLayout.id
-            } else {
-                nil
-            }
+            let keyboardIdBefore = KeyboardLayout.id
 
             // If we are in a keyDown then we don't need to redispatch a command-modded
             // key event (see docs for this field) so reset this to nil because
             // `interpretKeyEvents` may dispatch it.
             self.lastPerformKeyEvent = nil
 
+            interpretedKeyEventAsCommand = false
             self.interpretKeyEvents([translationEvent])
+
+            // AppKit calls doCommand(by:) when the input method wants the text
+            // client to execute a command. If the same event ended preedit,
+            // continue with the command after applying the IME result.
+            let inputMethodCommand = interpretedKeyEventAsCommand
+            let forwardInputMethodCommand = inputMethodCommand &&
+                markedTextBefore &&
+                markedText.length == 0
+            interpretedKeyEventAsCommand = false
 
             // If our keyboard changed from this we just assume an input method
             // grabbed it and do nothing.
@@ -1191,11 +1199,11 @@ extension Ghostty {
 
             // We're composing if we have preedit (the obvious case). But we're also
             // composing if we don't have preedit and we had marked text before,
-            // because this input probably just reset the preedit state. It shouldn't
-            // be encoded. Example: Japanese begin composing, then press backspace
-            // or ctrl+h. This should only cancel the composing state but not
-            // actually delete the prior input characters (prior to the composing).
-            let composing = markedText.length > 0 || markedTextBefore
+            // because this input may have only reset the preedit state. Without
+            // an explicit command callback, it shouldn't be encoded. For example,
+            // cancelling Japanese composition must not delete prior terminal text.
+            let composing = markedText.length > 0 ||
+                (markedTextBefore && !forwardInputMethodCommand)
 
             // The input method may commit all or part of the preedit text via
             // insertText while handling a key that should not itself be
@@ -1215,7 +1223,11 @@ extension Ghostty {
                     _ = committedTextAction(action, text: text)
                 }
 
-                if shouldReplayCommittedPreeditKey(translationEvent) {
+                if shouldReplayCommittedPreeditKey(
+                    translationEvent,
+                    preeditEnded: markedText.length == 0,
+                    interpretedAsCommand: inputMethodCommand
+                ) {
                     _ = keyAction(
                         action,
                         event: event,
@@ -1494,15 +1506,43 @@ extension Ghostty {
             }
         }
 
-        private func shouldReplayCommittedPreeditKey(_ event: NSEvent) -> Bool {
-            guard let key = Ghostty.Input.Key(keyCode: event.keyCode) else { return false }
+        private func shouldReplayCommittedPreeditKey(
+            _ event: NSEvent,
+            preeditEnded: Bool,
+            interpretedAsCommand: Bool
+        ) -> Bool {
+            return Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+                Ghostty.Input.Key(keyCode: event.keyCode),
+                modifiers: event.modifierFlags,
+                preeditEnded: preeditEnded,
+                interpretedAsCommand: interpretedAsCommand
+            )
+        }
+
+        static func shouldReplayCommittedPreeditKey(
+            _ key: Ghostty.Input.Key?,
+            modifiers: NSEvent.ModifierFlags,
+            preeditEnded: Bool,
+            interpretedAsCommand: Bool
+        ) -> Bool {
+            guard let key else { return false }
+
+            // Preserve an explicit command delivered after the input method
+            // committed its marked text. A commit without doCommand(by:) is
+            // still treated as text-only input.
+            if interpretedAsCommand,
+               preeditEnded,
+               key != .arrowLeft {
+                return true
+            }
+
             switch key {
             case .arrowDown, .arrowRight, .arrowUp:
                 return true
             case .arrowLeft:
                 // Don't replay plain left-arrow because AppKit already leaves
                 // the caret in place after Korean IMEs commit preedit text.
-                return !event.modifierFlags.isDisjoint(with: [.shift, .control, .option, .command])
+                return !modifiers.isDisjoint(with: [.shift, .control, .option, .command])
             default:
                 return false
             }
@@ -2117,6 +2157,10 @@ extension Ghostty.SurfaceView: NSTextInputClient {
     /// 1. Prevents an audible NSBeep for unimplemented actions.
     /// 2. Allows us to properly encode super+key input events that we don't handle
     override func doCommand(by selector: Selector) {
+        if keyTextAccumulator != nil {
+            interpretedKeyEventAsCommand = true
+        }
+
         // If we are being processed by performKeyEquivalent with a command binding,
         // we send it back through the event system so it can be encoded.
         if let lastPerformKeyEvent,

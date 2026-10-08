@@ -41,4 +41,54 @@ struct SurfaceViewAppKitTests {
             ) == false
         )
     }
+
+    @Test func replaysCommandsThatEndCommittedPreedit() {
+        for key in [Ghostty.Input.Key.backspace, .enter, .escape, .h] {
+            #expect(Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+                key,
+                modifiers: key == .h ? .control : [],
+                preeditEnded: true,
+                interpretedAsCommand: true
+            ))
+        }
+    }
+
+    @Test func doesNotReplayCommandWhilePreeditContinues() {
+        #expect(!Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+            .backspace,
+            modifiers: [],
+            preeditEnded: false,
+            interpretedAsCommand: true
+        ))
+    }
+
+    @Test func doesNotReplayCommittedTextThatWasNotACommand() {
+        #expect(!Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+            .space,
+            modifiers: [],
+            preeditEnded: true,
+            interpretedAsCommand: false
+        ))
+    }
+
+    @Test func preservesCommittedPreeditArrowBehavior() {
+        #expect(Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+            .arrowRight,
+            modifiers: [],
+            preeditEnded: true,
+            interpretedAsCommand: false
+        ))
+        #expect(!Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+            .arrowLeft,
+            modifiers: [],
+            preeditEnded: true,
+            interpretedAsCommand: true
+        ))
+        #expect(Ghostty.SurfaceView.shouldReplayCommittedPreeditKey(
+            .arrowLeft,
+            modifiers: .shift,
+            preeditEnded: true,
+            interpretedAsCommand: false
+        ))
+    }
 }
